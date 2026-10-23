@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Мобильная касса (Блэкаут)</title>
+    <!-- Подключаем сканер штрихкодов -->
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 10px; background: #f4f4f9; color: #333; }
+        .card { background: #fff; padding: 15px; margin-bottom: 10px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        button { padding: 10px 15px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; margin: 5px 0; }
+        button.success { background: #28a745; }
+        button.danger { background: #dc3545; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 14px; }
+        th { background: #f8f9fa; }
+        input, select { padding: 8px; font-size: 16px; width: 100%; box-sizing: border-box; margin-top: 5px; }
+        .search-results { max-height: 150px; overflow-y: auto; border: 1px solid #ddd; background: #fff; position: absolute; width: calc(100% - 60px); z-index: 10; }
+        .search-item { padding: 8px; cursor: pointer; border-bottom: 1px solid #eee; }
+        .search-item:hover { background: #f1f1f1; }
+        .search-container { position: relative; }
+        .check-history-item { background: #f9f9f9; border: 1px solid #ddd; padding: 10px; margin-top: 8px; border-radius: 5px; }
+    </style>
+</head>
+<body>
+
+    <h2>⚡ Мобильная касса (Офлайн)</h2>
+
+    <!-- Шаг 1: База товаров и добавление вручную -->
+    <div class="card">
+        <h3>1. База товаров и номенклатура</h3>
+        <label>Импорт JSON из 1С:</label>
+        <input type="file" id="jsonFile" accept=".json" onchange="loadProducts(event)">
+        <p id="productCount" style="color: green; font-weight: bold; margin-top: 5px;">Товары не загружены!</p>
+        
+        <hr style="margin: 15px 0;">
+        
+        <h4 style="margin: 0 0 5px 0;">Добавить товар в базу вручную:</h4>
+        <input type="text" id="newBarcode" placeholder="Штрихкод">
+        <input type="text" id="newName" placeholder="Название товара">
+        <input type="number" id="newPrice" placeholder="Цена (грн)">
+        <button class="success" onclick="addNewProductToDatabase()" style="width: 100%; margin-top: 8px;">Добавить товар в базу</button>
+    </div>
+
+    <!-- Шаг 2: Сканирование и ручной ввод -->
+    <div class="card">
+        <h3>2. Добавление товара в чек</h3>
+        
+        <!-- Ручной поиск по названию -->
+        <div class="search-container">
+            <label>Поиск по названию:</label>
+            <input type="text" id="searchBox" placeholder="Начни вводить название..." oninput="searchProducts(this.value)">
+            <div id="searchResults" class="search-results"></div>
+        </div>
+
+        <!-- Ручной ввод штрихкода -->
+        <div style="margin-top: 15px;">
+            <label>Или ввести штрихкод вручную:</label>
+            <div style="display: flex; gap: 5px;">
+                <input type="text" id="manualBarcode" placeholder="Введите штрихкод">
+                <button onclick="addManualBarcode()" style="margin-top: 5px;">Ок</button>
+            </div>
+        </div>
+
+        <hr style="margin: 15px 0;">
+
+        <!-- Камера -->
+        <div id="reader" style="width: 100%; max-width: 400px; margin: auto;"></div>
+        <button onclick="startScanner()">Включить камеру</button>
+        <button class="danger" onclick="stopScanner()">Выключить камеру</button>
+    </div>
+
+    <!-- Шаг 3: Текущий чек -->
+    <div class="card">
+        <h3>3. Текущий чек</h3>
+        <table id="cartTable">
+            <thead>
+                <tr>
+                    <th>Товар</th>
+                    <th>Цена</th>
+                    <th>Кол-во</th>
+                    <th>Сумма</th>
+                </tr>
+            </thead>
+            <tbody id="cartBody">
+                <!-- Сюда падают товары -->
+            </tbody>
+        </table>
+        
+        <h3>Итого: <span id="totalSum">0</span> грн</h3>
+
+        <label>Способ оплаты:</label>
+        <select id="paymentType">
+            <option value="Cash">Наличные</option>
+            <option value="Card">Карта</option>
+        </select>
+
+        <button class="success" style="width: 100%; margin-top: 10px;" onclick="closeCheck()">Пробить чек</button>
+    </div>
+
+    <!-- Шаг 4: История чеков и Экспорт -->
+    <div class="card">
+        <h3>4. История чеков и Экспорт в 1С</h3>
+        <p>Сохранено чеков: <span id="savedChecksCount">0</span></p>
+        <button onclick="exportChecks()">Скачать JSON с чеками</button>
+        <button class="danger" onclick="clearChecks()">Очистить историю</button>
+
+        <h4 style="margin-top: 15px;">Список пробитых чеков:</h4>
+        <div id="checksHistoryList" style="max-height: 300px; overflow-y: auto;">
+            <!-- Сюда выводится история чеков -->
+        </div>
+    </div>
+
+<script>
+    let products = {}; // База товаров { "штрихкод": {barcode, name, price} }
+    let cart = [];     // Текущий чек
+    let html5QrCode = null;
+
+    // Загрузка базы при старте страницы (если сохраняли ранее)
+    window.onload = function() {
+        let savedProducts = localStorage.getItem("offline_products");
+        if (savedProducts) {
+            products = JSON.parse(savedProducts);
+            document.getElementById("productCount").textContent = `Загружено товаров в базе: ${Object.keys(products).length}`;
+        }
+        updateChecksUI();
+    };
+
+    // 1. Загрузка номенклатуры из JSON-файла
+    function loadProducts(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            try {
+                const data = JSON.parse(e.target.result);
+                data.forEach(item => {
+                    products[item.barcode] = { barcode: item.barcode, name: item.name, price: item.price };
+                });
+                localStorage.setItem("offline_products", JSON.stringify(products));
+                document.getElementById("productCount").textContent = `Загружено товаров в базе: ${Object.keys(products).length}`;
+            } catch (err) {
+                alert("Ошибка чтения JSON файла!");
+            }
+        };
+        reader.readAsText(file);
+    }
+
+    // Ручное добавление товара в базу прямо со страницы
+    function addNewProductToDatabase() {
+        const barcode = document.getElementById("newBarcode").value.trim();
+        const name = document.getElementById("newName").value.trim();
+        const price = parseFloat(document.getElementById("newPrice").value);
+
+        if (!barcode || !name || isNaN(price)) {
+            alert("Заполните все поля для нового товара!");
+            return;
+        }
+
+        products[barcode] = { barcode: barcode, name: name, price: price };
+        localStorage.setItem("offline_products", JSON.stringify(products));
+        document.getElementById("productCount").textContent = `Загружено товаров в базе: ${Object.keys(products).length}`;
+
+        // Очищаем поля ввода
+        document.getElementById("newBarcode").value = "";
+        document.getElementById("newName").value = "";
+        document.getElementById("newPrice").value = "";
+        alert("Товар успешно добавлен в базу!");
+    }
+
+    // Поиск по названию
+    function searchProducts(query) {
+        const resultsContainer = document.getElementById("searchResults");
+        resultsContainer.innerHTML = "";
+        if (!query.trim()) return;
+
+        const lowerQuery = query.toLowerCase();
+        let matchCount = 0;
+
+        for (let code in products) {
+            let prod = products[code];
+            if (prod.name.toLowerCase().includes(lowerQuery)) {
+                matchCount++;
+                if (matchCount > 10) break;
+
+                const div = document.createElement("div");
+                div.className = "search-item";
+                div.textContent = `${prod.name} — ${prod.price} грн`;
+                div.onclick = function() {
+                    addProductToCart(prod.barcode);
+                    document.getElementById("searchBox").value = "";
+                    resultsContainer.innerHTML = "";
+                };
+                resultsContainer.appendChild(div);
+            }
+        }
+    }
+
+    function addManualBarcode() {
+        const codeInput = document.getElementById("manualBarcode");
+        const code = codeInput.value.trim();
+        if (products[code]) {
+            addProductToCart(code);
+            codeInput.value = "";
+        } else {
+            alert("Товар с таким штрихкодом не найден в базе!");
+        }
+    }
+
+    // 2. Управление сканером
+    function startScanner() {
+        if (!html5QrCode) {
+            html5QrCode = new Html5Qrcode("reader");
+        }
+        html5QrCode.start(
+            { facingMode: "environment" },
+            { fps: 10, qrbox: { width: 250, height: 150 } },
+            onScanSuccess
+        ).catch(err => {
+            alert("Не удалось запустить камеру: " + err);
+        });
+    }
+
+    function stopScanner() {
+        if (html5QrCode) {
+            html5QrCode.stop().catch(err => console.log(err));
+        }
+    }
+
+    function onScanSuccess(decodedText, decodedResult) {
+        if (products[decodedText]) {
+            addProductToCart(decodedText);
+            if (navigator.vibrate) navigator.vibrate(100);
+        }
+    }
+
+    function addProductToCart(barcode) {
+        const prod = products[barcode];
+        let existing = cart.find(item => item.barcode === barcode);
+        if (existing) {
+            existing.qty += 1;
+        } else {
+            cart.push({ barcode: barcode, name: prod.name, price: prod.price, qty: 1 });
+        }
+        updateCartUI();
+    }
+
+    function updateCartUI() {
+        const tbody = document.getElementById("cartBody");
+        tbody.innerHTML = "";
+        let total = 0;
+
+        cart.forEach((item, index) => {
+            let sum = item.price * item.qty;
+            total += sum;
+            tbody.innerHTML += `<tr>
+                <td>${item.name}</td>
+                <td>${item.price}</td>
+                <td>
+                    <button onclick="changeQty(${index}, -1)" style="padding: 2px 6px;">-</button>
+                    ${item.qty}
+                    <button onclick="changeQty(${index}, 1)" style="padding: 2px 6px;">+</button>
+                </td>
+                <td>${sum}</td>
+            </tr>`;
+        });
+
+        document.getElementById("totalSum").textContent = total;
+    }
+
+    function changeQty(index, delta) {
+        cart[index].qty += delta;
+        if (cart[index].qty <= 0) {
+            cart.splice(index, 1);
+        }
+        updateCartUI();
+    }
+
+    // 3. Закрытие чека и сохранение истории
+    function closeCheck() {
+        if (cart.length === 0) {
+            alert("Чек пустой!");
+            return;
+        }
+
+        const total = cart.reduce((sum, item) => sum + (item.price * item.qty), 0);
+        const paymentType = document.getElementById("paymentType").value;
+
+        const newCheck = {
+            id: "Check_" + Date.now(),
+            time: new Date().toLocaleString(),
+            paymentType: paymentType,
+            total: total,
+            items: [...cart]
+        };
+
+        let savedChecks = JSON.parse(localStorage.getItem("offline_checks") || "[]");
+        savedChecks.push(newCheck);
+        localStorage.setItem("offline_checks", JSON.stringify(savedChecks));
+
+        alert("Чек успешно сохранен!");
+        cart = [];
+        updateCartUI();
+        updateChecksUI();
+    }
+
+    // Обновление интерфейса истории чеков
+    function updateChecksUI() {
+        let savedChecks = JSON.parse(localStorage.getItem("offline_checks") || "[]");
+        document.getElementById("savedChecksCount").textContent = savedChecks.length;
+        
+        const historyContainer = document.getElementById("checksHistoryList");
+        historyContainer.innerHTML = "";
+
+        if (savedChecks.length === 0) {
+            historyContainer.innerHTML = "<p style='color: #777;'>История чеков пуста</p>";
+            return;
+        }
+
+        // Выводим чеки от новых к старым
+        savedChecks.slice().reverse().forEach(check => {
+            let itemsHtml = check.items.map(i => `${i.name} (${i.qty} шт. по ${i.price} грн)`).join(", ");
+            historyContainer.innerHTML += `
+                <div class="check-history-item">
+                    <b>${check.time}</b> | Оплата: <b>${check.paymentType === 'Cash' ? 'Наличные' : 'Карта'}</b><br>
+                    Сумма: <b style="color: green;">${check.total} грн</b><br>
+                    <span style="font-size: 12px; color: #555;">Товары: ${itemsHtml}</span>
+                </div>
+            `;
+        });
+    }
+
+    // 4. Экспорт чеков
+    function exportChecks() {
+        let savedChecks = localStorage.getItem("offline_checks") || "[]";
+        const blob = new Blob([savedChecks], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `checks_${Date.now()}.json`;
+        a.click();
+    }
+
+    function clearChecks() {
+        if (confirm("Точно удалить всю историю чеков?")) {
+            localStorage.removeItem("offline_checks");
+            updateChecksUI();
+        }
+    }
+</script>
+
+</body>
+</html>
